@@ -31,6 +31,8 @@
 #include <Interpreters/convertFieldToType.h>
 #include <Processors/Formats/Impl/Parquet/ParquetReader.h>
 #include <Processors/Formats/Impl/Parquet/ColumnFilterHelper.h>
+#include <Processors/Formats/Impl/ParquetMk4BlockInputFormat.h>
+#include <IO/SharedThreadPools.h>
 
 #include <boost/algorithm/string/case_conv.hpp>
 
@@ -953,6 +955,8 @@ void ParquetBlockInputFormat::threadFunction(size_t row_group_batch_idx)
 
         if (row_group_batch.status == RowGroupBatchState::Status::Done)
             return;
+
+        CurrentThread::updatePerformanceCountersIfNeeded();
     }
 }
 bool ParquetBlockInputFormat::supportPrefetch() const
@@ -1258,16 +1262,33 @@ void registerInputFormatParquet(FormatFactory & factory)
                const ReadSettings & read_settings,
                bool is_remote_fs,
                size_t max_download_threads,
-               size_t max_parsing_threads)
+               size_t max_parsing_threads) -> InputFormatPtr
             {
                 size_t min_bytes_for_seek = is_remote_fs ? read_settings.remote_read_min_bytes_for_seek : settings.parquet.local_read_min_bytes_for_seek;
-                return std::make_shared<ParquetBlockInputFormat>(
-                    buf,
-                    sample,
-                    settings,
-                    max_parsing_threads,
-                    max_download_threads,
-                    min_bytes_for_seek);
+                if (settings.parquet.use_native_reader_v3)
+                {
+                    //TODO: actually share the shared pool, fill out its fields using settings
+                    auto pool = std::make_shared<Parquet::SharedParsingThreadPool>();
+                    pool->io_runner.emplace(
+                        getFormatParsingThreadPool().get(), max_download_threads, "parquet io", CurrentThread::getGroup());
+                    pool->parsing_runner.emplace(
+                        getFormatParsingThreadPool().get(), max_parsing_threads, "parquet parser", CurrentThread::getGroup());
+                    pool->total_memory_target = settings.parquet.memory_target;
+                    return std::make_shared<ParquetMk4BlockInputFormat>(
+                        buf,
+                        sample,
+                        settings,
+                        pool,
+                        min_bytes_for_seek);
+                }
+                else
+                    return std::make_shared<ParquetBlockInputFormat>(
+                        buf,
+                        sample,
+                        settings,
+                        max_parsing_threads,
+                        max_download_threads,
+                        min_bytes_for_seek);
             });
     factory.markFormatSupportsSubsetOfColumns("Parquet");
 }
@@ -1278,6 +1299,7 @@ void registerParquetSchemaReader(FormatFactory & factory)
         "Parquet",
         [](ReadBuffer & buf, const FormatSettings & settings)
         {
+            //TODO: maybe make a custom one reusing the parser dispatch code
             return std::make_shared<ParquetSchemaReader>(buf, settings);
         }
         );
