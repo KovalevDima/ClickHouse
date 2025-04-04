@@ -25,12 +25,6 @@ instance = cluster.add_instance(
     stay_alive=True,
 )
 
-instance2 = cluster.add_instance(
-    "instance2",
-    user_configs=["configs/users.xml"],
-    with_rabbitmq=True,
-)
-
 # Helpers
 
 
@@ -213,9 +207,10 @@ def test_rabbitmq_restore_failed_connection_without_losses_2(rabbitmq_cluster):
 
     deadline = time.monotonic() + 180
     while time.monotonic() < deadline:
-        if int(instance.query("SELECT count() FROM test.view")) != 0:
+        result = int(instance.query("SELECT count() FROM test.view"))
+        logging.debug(f"First result: {result} / {messages_num}")
+        if result != 0:
             break
-        logging.debug(3)
         time.sleep(0.1)
     else:
         pytest.fail(f"Time limit of 180 seconds reached. The count is still 0.")
